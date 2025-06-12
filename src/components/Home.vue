@@ -18,7 +18,11 @@
         <EkfHelperTool  @close="state.showEkfHelper = false" v-if="state.showEkfHelper"></EkfHelperTool>
         <div class="container-fluid" style="height: 100%; overflow: hidden;">
 
-            <sidebar/>
+            <sidebar>
+                <template v-slot:default>
+                    <ChatAssistant />
+                </template>
+            </sidebar>
 
             <main class="col-md-9 ml-sm-auto col-lg-10 flex-column d-sm-flex" role="main">
 
@@ -29,7 +33,8 @@
                         <Plotly/>
                     </div>
                 </div>
-                <div class="row" v-bind:class="[state.plotOn ? 'h-50' : 'h-100']"
+                <div class="row"
+                     v-bind:class="[state.plotOn ? 'h-50' : 'h-100']"
                      v-if="state.mapAvailable && mapOk && state.showMap">
                     <div class="col-12 noPadding">
                         <CesiumViewer ref="cesiumViewer"/>
@@ -51,6 +56,7 @@ import ParamViewer from '@/components/widgets/ParamViewer.vue'
 import MessageViewer from '@/components/widgets/MessageViewer.vue'
 import DeviceIDViewer from '@/components/widgets/DeviceIDViewer.vue'
 import AttitudeViewer from '@/components/widgets/AttitudeWidget.vue'
+import ChatAssistant from '@/components/ChatAssistant.vue'
 import { store } from '@/components/Globals.js'
 import { AtomSpinner } from 'epic-spinners'
 import { Color } from 'cesium'
@@ -239,7 +245,8 @@ export default {
         DeviceIDViewer,
         AttitudeViewer,
         MagFitTool,
-        EkfHelperTool
+        EkfHelperTool,
+        ChatAssistant
     },
     computed: {
         mapOk () {

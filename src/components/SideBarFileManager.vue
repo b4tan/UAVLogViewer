@@ -61,60 +61,132 @@ export default {
     },
     beforeDestroy () {
         this.$eventHub.$off('open-sample')
+        this.$eventHub.$off('loadType')
+        this.$eventHub.$off('trimFile')
+        this.clearFlightData()
     },
     methods: {
         trimFile () {
             worker.postMessage({ action: 'trimFile', time: this.state.timeRange })
         },
-        onLoadSample (file) {
-            let url
+        async onLoadSample (file) {
             if (file === 'sample') {
                 this.state.file = 'sample'
-                url = require('../assets/vtol.tlog').default
                 this.state.logType = 'tlog'
-            } else {
-                url = file
-                // Set the file name for display purposes
-                const urlParts = url.split('/')
-                this.state.file = urlParts[urlParts.length - 1]
-            }
-            const oReq = new XMLHttpRequest()
-            console.log(`loading file from ${url}`)
+                try {
+                    // First process the sample file for visualization
+                    const sampleUrl = require('../assets/vtol.tlog').default
+                    const oReq = new XMLHttpRequest()
+                    oReq.open('GET', sampleUrl, true)
+                    oReq.responseType = 'arraybuffer'
+                    oReq.onload = async (oEvent) => {
+                        const arrayBuffer = oReq.response
+                        this.transferMessage = 'Download Done'
+                        // Process for visualization
+                        worker.postMessage({
+                            action: 'parse',
+                            file: arrayBuffer,
+                            isTlog: true,
+                            isDji: false
+                        })
 
-            // Set the log type based on file extension
-            this.state.logType = url.indexOf('.tlog') > 0 ? 'tlog' : 'bin'
-            if (url.indexOf('.txt') > 0) {
-                this.state.logType = 'dji'
-            }
-
-            oReq.open('GET', url, true)
-            oReq.responseType = 'arraybuffer'
-
-            // Use arrow function to preserve 'this' context
-            oReq.onload = (oEvent) => {
-                const arrayBuffer = oReq.response
-
-                this.transferMessage = 'Download Done'
-                this.sampleLoaded = true
-                worker.postMessage({
-                    action: 'parse',
-                    file: arrayBuffer,
-                    isTlog: (url.indexOf('.tlog') > 0),
-                    isDji: (url.indexOf('.txt') > 0)
-                })
-            }
-            oReq.addEventListener('progress', (e) => {
-                if (e.lengthComputable) {
-                    this.uploadpercentage = 100 * e.loaded / e.total
+                        // Call the backend to process the sample file
+                        const response = await fetch('http://localhost:8000/api/open-sample', {
+                            method: 'POST'
+                        })
+                        if (!response.ok) {
+                            throw new Error('Failed to process sample file')
+                        }
+                        const { fileKey } = await response.json()
+                        if (fileKey) {
+                            this.state.dataLoaded = true
+                            this.state.currentFileKey = fileKey
+                            this.$eventHub.$emit('file-loaded', fileKey)
+                            console.log('Sample file processed successfully:', fileKey)
+                        } else {
+                            throw new Error('No file key returned from server')
+                        }
+                    }
+                    oReq.addEventListener('progress', (e) => {
+                        if (e.lengthComputable) {
+                            this.uploadpercentage = 100 * e.loaded / e.total
+                        }
+                    }, false)
+                    oReq.onerror = (error) => {
+                        console.error('Error loading sample file:', error)
+                        this.clearFlightData()
+                    }
+                    oReq.send()
+                } catch (error) {
+                    console.error('Error processing sample file:', error)
+                    this.clearFlightData()
                 }
-            }
-            , false)
-            oReq.onerror = (error) => {
-                alert('unable to fetch remote file, check CORS settings in the target server')
-                console.log(error)
-            }
+            } else {
+                const fileUrl = file
+                // Set the file name for display purposes
+                const urlParts = fileUrl.split('/')
+                this.state.file = urlParts[urlParts.length - 1]
+                const oReq = new XMLHttpRequest()
+                console.log(`loading file from ${fileUrl}`)
+                // Set the log type based on file extension
+                this.state.logType = fileUrl.indexOf('.tlog') > 0 ? 'tlog' : 'bin'
+                if (fileUrl.indexOf('.txt') > 0) {
+                    this.state.logType = 'dji'
+                }
+                oReq.open('GET', fileUrl, true)
+                oReq.responseType = 'arraybuffer'
+                oReq.onload = async (oEvent) => {
+                    const arrayBuffer = oReq.response
+                    this.transferMessage = 'Download Done'
+                    worker.postMessage({
+                        action: 'parse',
+                        file: arrayBuffer,
+                        isTlog: (fileUrl.indexOf('.tlog') > 0),
+                        isDji: (fileUrl.indexOf('.txt') > 0)
+                    })
 
-            oReq.send()
+                    // Send file to backend
+                    try {
+                        const formData = new FormData()
+                        formData.append(
+                            'file',
+                            new Blob([arrayBuffer], { type: 'application/octet-stream' }),
+                            this.state.file
+                        )
+                        const response = await fetch('http://localhost:8000/api/upload', {
+                            method: 'POST',
+                            body: formData
+                        })
+                        if (!response.ok) {
+                            throw new Error('Failed to upload file')
+                        }
+                        const { fileKey } = await response.json()
+                        if (fileKey) {
+                            this.state.dataLoaded = true
+                            this.state.currentFileKey = fileKey
+                            this.$eventHub.$emit('file-loaded', fileKey)
+                            console.log('File processed successfully:', fileKey)
+                        } else {
+                            throw new Error('No file key returned from server')
+                        }
+                    } catch (error) {
+                        console.error('Error uploading file:', error)
+                        this.clearFlightData()
+                    }
+                }
+                oReq.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        this.uploadpercentage = 100 * e.loaded / e.total
+                    }
+                }, false)
+                oReq.onerror = (error) => {
+                    alert('unable to fetch remote file, check CORS settings in the target server')
+                    console.log(error)
+                    this.state.dataLoaded = false
+                    this.state.currentFileKey = null
+                }
+                oReq.send()
+            }
         },
         onChange (ev) {
             const fileinput = document.getElementById('choosefile')
@@ -151,19 +223,50 @@ export default {
             this.state.processStatus = 'Pre-processing...'
             this.state.processPercentage = 100
             this.file = file
+
             const reader = new FileReader()
-            reader.onload = function (e) {
+            reader.onload = async (e) => {
                 const data = reader.result
+                // Process for visualization
                 worker.postMessage({
                     action: 'parse',
                     file: data,
                     isTlog: (file.name.endsWith('tlog')),
                     isDji: (file.name.endsWith('txt'))
                 })
+
+                try {
+                    // Upload to backend
+                    const formData = new FormData()
+                    formData.append(
+                        'file',
+                        new Blob([data], { type: 'application/octet-stream' }),
+                        file.name
+                    )
+                    const response = await fetch('http://localhost:8000/api/upload', {
+                        method: 'POST',
+                        body: formData
+                    })
+                    if (!response.ok) {
+                        throw new Error('Failed to upload file')
+                    }
+                    const responseData = await response.json()
+                    if (responseData.fileKey) {
+                        this.state.dataLoaded = true
+                        this.state.currentFileKey = responseData.fileKey
+                        this.$eventHub.$emit('file-loaded', responseData.fileKey)
+                        console.log('File processed successfully:', responseData.fileKey)
+                    } else {
+                        throw new Error(responseData.error || 'Failed to process file')
+                    }
+                } catch (error) {
+                    console.error('Error uploading file:', error)
+                    this.clearFlightData()
+                }
             }
-            this.state.logType = file.name.endsWith('tlog') ? 'tlog' : 'bin'
-            if (file.name.endsWith('.txt')) {
-                this.state.logType = 'dji'
+            reader.onerror = () => {
+                console.error('Error reading file')
+                this.clearFlightData()
             }
             reader.readAsArrayBuffer(file)
         },
@@ -225,6 +328,14 @@ export default {
             a.click()
             document.body.removeChild(a)
             window.URL.revokeObjectURL(url)
+        },
+        clearFlightData () {
+            this.state.file = null
+            this.state.currentFileKey = null
+            this.state.dataLoaded = false
+            // Only clear history when user clicks home or reloads
+            // fetch('http://localhost:8000/api/clear-history', { method: 'POST' })
+            //     .catch(error => console.error('Error clearing history:', error))
         }
     },
     mounted () {
