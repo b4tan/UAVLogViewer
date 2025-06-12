@@ -20,6 +20,12 @@
           </div>
         </div>
       </div>
+      <div v-if="isEmbedding" class="message system">
+        <div class="message-content">
+          <div class="loading-circle"></div>
+          Creating embeddings for flight log analysis...
+        </div>
+      </div>
     </div>
 
     <!-- Input area -->
@@ -49,7 +55,9 @@ export default {
     data () {
         return {
             userInput: '',
-            store
+            store,
+            ws: null,
+            isEmbedding: false
         }
     },
     computed: {
@@ -66,10 +74,32 @@ export default {
     created () {
         this.$eventHub.$on('file-loaded', this.handleFileLoaded)
         this.$eventHub.$on('clear-chat', this.handleClearChat)
+        // Connect to WebSocket
+        this.ws = new WebSocket('ws://localhost:8000/ws')
+        this.ws.onmessage = (event) => {
+            const data = JSON.parse(event.data)
+            if (data.type === 'embedding_status') {
+                if (data.message.includes('Creating embeddings')) {
+                    this.isEmbedding = true
+                } else if (data.message.includes('successfully')) {
+                    this.isEmbedding = false
+                    this.store.chatHistory.push({
+                        role: 'system',
+                        content: data.message
+                    })
+                }
+                this.$nextTick(() => {
+                    this.scrollToBottom()
+                })
+            }
+        }
     },
     beforeDestroy () {
         this.$eventHub.$off('file-loaded')
         this.$eventHub.$off('clear-chat')
+        if (this.ws) {
+            this.ws.close()
+        }
     },
     methods: {
         handleFileLoaded (fileKey) {
@@ -183,34 +213,54 @@ export default {
 <style scoped>
 .chat-assistant {
     width: 100%;
-    margin: 5px 0 5px 0;
+    margin: 0 5px 5px 0;
     background: white;
     border-radius: 10px;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
     display: flex;
+    flex-shrink: 0;
     flex-direction: column;
-    height: 250px;
+    height: 430px;
     max-width: 100%;
+    margin-top: auto;
 }
 
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 15px;
+  padding: 5px;
+  margin-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  align-items: flex-start;
 }
 
 .message {
+  font-size: 0.8em;
   max-width: 80%;
-  padding: 10px 15px;
-  border-radius: 15px;
-  margin: 5px 0;
+  border-radius: 16px;
+  justify-content: center;
+  margin: 0;
+  box-sizing: border-box;
+  display: block;
+  align-items: center;
+}
+
+.message-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px 10px 10px;
+  min-height: 10px;
+  word-wrap: break-word;
+  white-space: pre-line;
+  box-sizing: border-box;
 }
 
 .message.user {
   align-self: flex-end;
+  justify-content: center;
   background-color: #007bff;
   color: white;
 }
@@ -221,12 +271,19 @@ export default {
   color: #333;
 }
 
-.message-content {
-  word-wrap: break-word;
+.message.system {
+  align-self: center;
+  background-color: #e9ecef;
+  color: #495057;
+  font-style: italic;
+  text-align: center;
+  border-radius: 16px;
+  margin: 8px 0;
 }
 
 .chat-input {
-  padding: 15px;
+  font-size: 0.8em;
+  padding: 7px;
   border-top: 1px solid #eee;
   display: flex;
   gap: 10px;
@@ -291,8 +348,25 @@ textarea:disabled {
 
 .chat-info-message {
     color: #888;
-    font-size: 0.95em;
+    font-size: 0.8em;
     margin-bottom: 10px;
     text-align: center;
+}
+
+.loading-circle {
+  display: inline-block;
+  width: 25px;
+  height: 25px;
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #3498db;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-right: 10px;
+  vertical-align: middle;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 </style>

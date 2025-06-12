@@ -1,0 +1,12 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+python-dotenv==1.0.0
+pymavlink==2.4.37
+sentence-transformers==2.2.2
+faiss-cpu==1.7.4
+numpy==1.24.3
+langchain==0.1.0
+langchain-google-genai==0.0.5
+google-generativeai==0.3.2
+pydantic==2.5.2 

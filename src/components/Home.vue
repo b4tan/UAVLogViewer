@@ -98,6 +98,37 @@ export default {
                     this.dataExtractor = DataflashDataExtractor
                 }
             }
+
+            // Check if we have trajectory data in metadata
+            if (this.state.metadata && this.state.metadata.trajectory_data) {
+                this.state.trajectories = this.state.metadata.trajectory_data
+                this.state.trajectorySources = this.state.metadata.trajectorySources || ['GLOBAL_POSITION_INT']
+                this.state.trajectorySource = this.state.trajectorySources[0]
+                try {
+                    this.state.currentTrajectory = this.state.trajectories[this.state.trajectorySource].trajectory
+                    this.state.timeTrajectory = this.state.trajectories[this.state.trajectorySource].timeTrajectory
+                } catch (error) {
+                    console.log('Error loading trajectory from metadata:', error)
+                }
+            } else {
+                // Fallback to extracting trajectory from messages
+                this.state.trajectorySources = this.dataExtractor.extractTrajectorySources(this.state.messages)
+                if (this.state.trajectorySources.length > 0) {
+                    const first = this.state.trajectorySources[0]
+                    this.state.trajectorySource = first
+                    this.state.trajectories = this.dataExtractor.extractTrajectory(
+                        this.state.messages,
+                        first
+                    )
+                    try {
+                        this.state.currentTrajectory = this.state.trajectories[first].trajectory
+                        this.state.timeTrajectory = this.state.trajectories[first].timeTrajectory
+                    } catch (error) {
+                        console.log('Error loading trajectory from messages:', error)
+                    }
+                }
+            }
+
             if ('FMTU' in this.state.messages && this.state.messages.FMTU.length === 0) {
                 this.state.processStatus = 'ERROR PARSING?'
             }
@@ -160,40 +191,28 @@ export default {
             const list = Object.keys(this.state.timeAttitude)
             this.state.lastTime = parseInt(list[list.length - 1])
 
-            this.state.trajectorySources = this.dataExtractor.extractTrajectorySources(this.state.messages)
-            if (this.state.trajectorySources.length > 0) {
-                const first = this.state.trajectorySources[0]
-                this.state.trajectorySource = first
-                this.state.trajectories = this.dataExtractor.extractTrajectory(
-                    this.state.messages,
-                    first
-                )
-                try {
-                    this.state.currentTrajectory = this.state.trajectories[first].trajectory
-                    this.state.timeTrajectory = this.state.trajectories[first].timeTrajectory
-                } catch {
-                    console.log('unable to load trajectory')
-                }
-            }
             try {
                 if (this.state.messages?.GPS?.time_boot_ms) {
-                    this.state.metadata = { startTime: this.dataExtractor.extractStartTime(this.state.messages.GPS) }
-                } else {
                     this.state.metadata = {
+                        ...this.state.metadata,
+                        startTime: this.dataExtractor.extractStartTime(this.state.messages.GPS)
+                    }
+                } else if (this.state.messages?.['GPS[0]']?.time_boot_ms) {
+                    this.state.metadata = {
+                        ...this.state.metadata,
                         startTime: this.dataExtractor.extractStartTime(this.state.messages['GPS[0]'])
                     }
                 }
             } catch (error) {
-                console.log('unable to load metadata')
-                console.log(error)
+                console.log('Error loading metadata:', error)
             }
+
             try {
                 this.state.namedFloats = this.dataExtractor.extractNamedValueFloatNames(this.state.messages)
-                console.log(this.state.namedFloats)
             } catch (error) {
-                console.log('unable to load named floats')
-                console.log(error)
+                console.log('Error loading named floats:', error)
             }
+
             Vue.delete(this.state.messages, 'AHR2')
             Vue.delete(this.state.messages, 'POS')
             Vue.delete(this.state.messages, 'GPS')

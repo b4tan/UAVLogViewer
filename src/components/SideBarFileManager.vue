@@ -235,14 +235,13 @@ export default {
                     isDji: (file.name.endsWith('txt'))
                 })
 
+                // Set log type based on file extension
+                this.state.logType = file.name.endsWith('tlog') ? 'tlog' : 'bin'
+
+                // Upload to backend first
                 try {
-                    // Upload to backend
                     const formData = new FormData()
-                    formData.append(
-                        'file',
-                        new Blob([data], { type: 'application/octet-stream' }),
-                        file.name
-                    )
+                    formData.append('file', file)
                     const response = await fetch('http://localhost:8000/api/upload', {
                         method: 'POST',
                         body: formData
@@ -250,23 +249,38 @@ export default {
                     if (!response.ok) {
                         throw new Error('Failed to upload file')
                     }
-                    const responseData = await response.json()
-                    if (responseData.fileKey) {
+                    const { fileKey } = await response.json()
+                    if (fileKey) {
                         this.state.dataLoaded = true
-                        this.state.currentFileKey = responseData.fileKey
-                        this.$eventHub.$emit('file-loaded', responseData.fileKey)
-                        console.log('File processed successfully:', responseData.fileKey)
+                        this.state.currentFileKey = fileKey
+                        this.$eventHub.$emit('file-loaded', fileKey)
+                        console.log('File processed successfully:', fileKey)
                     } else {
-                        throw new Error(responseData.error || 'Failed to process file')
+                        throw new Error('No file key returned from server')
                     }
                 } catch (error) {
                     console.error('Error uploading file:', error)
                     this.clearFlightData()
                 }
-            }
-            reader.onerror = () => {
-                console.error('Error reading file')
-                this.clearFlightData()
+
+                // Wait for worker to process the file for visualization
+                await new Promise((resolve) => {
+                    const checkMessages = () => {
+                        if (this.state.messages && Object.keys(this.state.messages).length > 0) {
+                            resolve()
+                        } else {
+                            setTimeout(checkMessages, 100)
+                        }
+                    }
+                    checkMessages()
+                })
+
+                // Set trajectory source if available
+                if (this.state.messages.GLOBAL_POSITION_INT) {
+                    this.state.trajectorySource = 'GLOBAL_POSITION_INT'
+                } else if (this.state.messages.GPS_RAW_INT) {
+                    this.state.trajectorySource = 'GPS_RAW_INT'
+                }
             }
             reader.readAsArrayBuffer(file)
         },

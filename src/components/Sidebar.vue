@@ -1,6 +1,6 @@
 <template>
 <!-- HEADER -->
-    <div class="nav-side-menu col-lg-2">
+    <div class="sidebar-flex-col nav-side-menu col-lg-2">
 
         <h1 class="brand">
             <a class="github" href="https://github.com/ardupilot/uavlogviewer">
@@ -237,6 +237,13 @@ export default {
         padding: 2px 60px 2px 55px !important;
        }
     }
+
+.sidebar-flex-col {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    /* Ensures children (like ChatAssistant) can use margin-top: auto to stay at the bottom */
+}
 </style>
 
 <style>
@@ -594,4 +601,7 @@ a.centered-section {
         margin-left: 40%;
 
     }
+.nav-side-menu .tabholder {
+  margin-top: 12px;
+}
 </style>

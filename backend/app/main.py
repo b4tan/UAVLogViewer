@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import uuid
@@ -10,7 +10,10 @@ import logging
 from .mavlink_parser import MAVLinkParser
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from .embeddings import build_snippets, create_embeddings, save_faiss_index, retrieve_relevant_snippets
+from .embeddings import build_snippets, create_embeddings, save_faiss_index, retrieve_relevant_snippets, classify_query_type
+from .tools import retrieve_snippets, detect_anomalies
+from .agents import FlightLogAgentOrchestrator
+import numpy as np
 
 load_dotenv()
 
@@ -39,48 +42,28 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # Store for file metadata and parsed data
 file_data = {}
 
-def call_gemini_llm(message: str, parsed_data: dict, chat_history: List[dict], context: str = "") -> str:
-    """
-    Calls Gemini LLM to decide if the question is flight-specific and answer accordingly.
-    Uses the google.generativeai library and the GEMINI_API_KEY environment variable.
-    """
-    import google.generativeai as genai
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        return "[Error: Gemini API key not set in GOOGLE_API_KEY environment variable.]"
-    genai.configure(api_key=api_key)
+# Store active WebSocket connections
+active_connections: List[WebSocket] = []
 
-    # Build the context prompt
-    prompt = (
-        "You are FlightDataAgent. Use ONLY the following flight log data snippets to answer the user's question.\n"
-        f"CONTEXT SNIPPETS:\n{context}\n\n"
-        "If the user's question is about this specific flight, answer using ONLY the provided telemetry data. "
-        "If you do not have enough data to answer, politely ask the user to upload a flight log or provide more information. "
-        "Here is the parsed telemetry data (metadata and message types):\n"
-        f"METADATA: {parsed_data.get('metadata', {})}\n"
-        f"MESSAGE TYPES: {parsed_data.get('message_types', [])}\n"
-        "\nUSER QUESTION: '" + message + "'\n"
-        "If the answer isn't in the provided data, say 'I don't see that in the log.'\n"
-        "If more clarification is needed, ask the user a follow-up.\n"
-        "Keep answers concise and reference timestamps where possible.\n"
-        "You may use the ArduPilot log documentation for reference: https://ardupilot.org/plane/docs/logmessages.html\n"
-    )
+# Initialize orchestrator
+orchestrator = FlightLogAgentOrchestrator(api_key=os.getenv("GOOGLE_API_KEY"))
 
-    # Prepare chat history for Gemini (if any)
-    history = []
-    for turn in chat_history:
-        if turn.get("role") == "user":
-            history.append({"role": "user", "parts": [turn.get("content", "")]})
-        elif turn.get("role") == "assistant":
-            history.append({"role": "model", "parts": [turn.get("content", "")]})
-
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    active_connections.append(websocket)
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        chat = model.start_chat(history=history)
-        response = chat.send_message(prompt)
-        return response.text
-    except Exception as e:
-        return f"[Error communicating with Gemini LLM: {e}]"
+        while True:
+            await websocket.receive_text()
+    except:
+        active_connections.remove(websocket)
+
+async def notify_embedding_status(message: str):
+    for connection in active_connections:
+        try:
+            await connection.send_text(json.dumps({"type": "embedding_status", "message": message}))
+        except:
+            continue
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -88,8 +71,11 @@ async def upload_file(file: UploadFile = File(...)):
         # Generate unique file key
         file_key = str(uuid.uuid4())
         
+        # Preserve original file extension
+        original_extension = Path(file.filename).suffix
+        file_path = UPLOAD_DIR / f"{file_key}{original_extension}"
+        
         # Save file
-        file_path = UPLOAD_DIR / f"{file_key}.bin"
         with file_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
@@ -97,29 +83,38 @@ async def upload_file(file: UploadFile = File(...)):
         parser = MAVLinkParser(file_path)
         parsed_data = parser.parse()
 
-
-        # Do NOT save parsed_data to disk as JSON (avoid serialization errors)
-        # Only keep in memory and process embeddings as in open-sample
+        # Get vehicle type from parsed data
+        vehicle_type = parsed_data.get("vehicle_type", "UNKNOWN")
+        if vehicle_type == "UNKNOWN" and "HEARTBEAT" in parsed_data.get("messages", {}):
+            heartbeat = parsed_data["messages"]["HEARTBEAT"][0]
+            vehicle_type = heartbeat.get("type", "UNKNOWN")
 
         # Store data
         file_data[file_key] = {
             "filename": file.filename,
             "content_type": file.content_type,
             "size": file_path.stat().st_size,
-            "parsed_data": parsed_data
+            "parsed_data": parsed_data,
+            "file_extension": original_extension,
+            "vehicle_type": vehicle_type  # Add vehicle type to stored data
         }
         
         logger.info(f"Successfully processed file {file.filename} with key {file_key}")
 
+        # Notify about embedding creation
+        await notify_embedding_status("Creating embeddings for flight log analysis...")
         
         # After parsing, build and store vector embeddings
         snippets = build_snippets(parsed_data)
         embeddings = create_embeddings(snippets)
         save_faiss_index(file_key, embeddings, snippets)
         
+        # Notify completion
+        await notify_embedding_status("Embeddings created successfully!")
+        
         return {"fileKey": file_key}
     except Exception as e:
-        logger.error(f"Error processing file: {e}")
+        logger.error(f"Error processing file: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/open-sample")
@@ -145,25 +140,31 @@ async def open_sample():
             "filename": "vtol.tlog",
             "content_type": "application/octet-stream",
             "size": dest_path.stat().st_size,
-            "parsed_data": parsed_data
+            "parsed_data": parsed_data,
+            "file_extension": ".tlog"
         }
         
         logger.info(f"Successfully processed sample file with key {file_key}")
 
+        # Notify about embedding creation
+        await notify_embedding_status("Creating embeddings for flight log analysis...")
         
-        # After parsing, build and store vector embeddings (open-sample)
+        # After parsing, build and store vector embeddings
         snippets = build_snippets(parsed_data)
         embeddings = create_embeddings(snippets)
         save_faiss_index(file_key, embeddings, snippets)
         
+        # Notify completion
+        await notify_embedding_status("Embeddings created successfully!")
+        
         return {"fileKey": file_key}
     except Exception as e:
-        logger.error(f"Error processing sample file: {e}")
+        logger.error(f"Error processing sample file: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 class ChatRequest(BaseModel):
     message: str
-    fileKey: str
+    fileKey: Optional[str] = None
     telemetryData: Optional[Dict[str, Any]] = None
     chatHistory: Optional[List[Dict[str, str]]] = None
 
@@ -175,25 +176,86 @@ async def chat(request: ChatRequest):
     try:
         message = request.message
         fileKey = request.fileKey
-        telemetryData = request.telemetryData
-        chatHistory = request.chatHistory
+        chatHistory = request.chatHistory or []
 
-        # Try to get parsed_data, but allow it to be empty
-        parsed_data = {}
-        if fileKey and fileKey in file_data:
-            parsed_data = file_data[fileKey].get("parsed_data", {})
+        # Handle chat with or without flight log
+        if fileKey and fileKey not in file_data:
+            # Check if this is a sample file
+            sample_path = Path("../src/assets/vtol.tlog")
+            if sample_path.exists():
+                dest_path = UPLOAD_DIR / f"{fileKey}.tlog"
+                shutil.copy2(sample_path, dest_path)
+                parser = MAVLinkParser(dest_path)
+                parsed_data = parser.parse()
+                file_data[fileKey] = {
+                    "filename": "vtol.tlog",
+                    "content_type": "application/octet-stream",
+                    "size": dest_path.stat().st_size,
+                    "parsed_data": parsed_data,
+                    "vehicle_type": parsed_data.get("vehicle_type", "UNKNOWN")
+                }
+                logger.info(f"Successfully processed sample file with key {fileKey}")
+                snippets = build_snippets(parsed_data)
+                embeddings = create_embeddings(snippets)
+                save_faiss_index(fileKey, embeddings, snippets)
+            else:
+                raise HTTPException(status_code=404, detail="File not found or embeddings not created")
 
-        # Retrieve relevant telemetry snippets using vector search
-        context = ""
-        if fileKey:
+        # Add file context to chat history if it's not already there
+        if fileKey and not any("Flight log loaded successfully" in msg.get("content", "") for msg in chatHistory):
+            vehicle_type = file_data[fileKey].get("vehicle_type", "UNKNOWN")
+            chatHistory.insert(0, {
+                "role": "system",
+                "content": f"Flight log loaded successfully. This is a {vehicle_type} flight log. You can now ask questions about the flight data. FileKey: {fileKey}"
+            })
+
+        # --- Classify the query type ---
+        query_type = classify_query_type(message)
+        if query_type == "unknown":
+            logger.info("General chat detected, answering without embedding/LLM/tool.")
+            response = await orchestrator.answer_question(message, fileKey, chatHistory)
+            return {"response": response}
+
+        # --- Embedding short-circuit: Try to answer using FAISS before LLM ---
+        if fileKey and query_type in ("retrieval", "anomaly_tool"):
             try:
-                relevant_snippets = retrieve_relevant_snippets(fileKey, message, top_k=10)
-                context = "\n".join([s["text"] for s in relevant_snippets])
+                # Retrieve top 1 relevant snippet and its similarity
+                top_k = 1
+                snippets = retrieve_relevant_snippets(fileKey, message, top_k=top_k)
+                if snippets:
+                    # Compute cosine similarity between question and snippet
+                    from .embeddings import model
+                    q_emb = model.encode([message]).astype("float32")[0]
+                    outdir = Path("uploads/faiss_indexes")
+                    import faiss
+                    index = faiss.read_index(str(outdir / f"{fileKey}.index"))
+                    D, I = index.search(np.expand_dims(q_emb, 0), top_k)
+                    # FAISS returns L2 distance, convert to cosine similarity
+                    # If vectors are normalized, cosine_sim = 1 - 0.5 * L2^2
+                    l2 = D[0][0]
+                    cosine_sim = 1 - 0.5 * l2
+                    logger.info(f"Embedding similarity for '{message}': {cosine_sim:.3f}")
+                    if cosine_sim > 0.3:
+                        logger.info("High confidence embedding match found, refining response...")
+                        # Instead of returning raw snippet, use the orchestrator to refine it
+                        response = await orchestrator.answer_question(
+                            message=message,
+                            fileKey=fileKey,
+                            chatHistory=chatHistory,
+                            embedding_snippet=snippets[0]["text"]  # Pass the snippet to the orchestrator
+                        )
+                        return {"response": response}
             except Exception as e:
-                logger.warning(f"Could not retrieve vector search context: {e}")
+                logger.warning(f"Embedding search failed: {e}")
+                # Fallback to LLM if embedding search fails
+                pass
 
-        llm_response = call_gemini_llm(message, parsed_data, chatHistory or [], context)
-        return {"response": llm_response}
+        # --- If no good embedding match, call orchestrator/LLM ---
+        logger.info("Calling LLM orchestrator for response.")
+        response = await orchestrator.answer_question(message, fileKey, chatHistory)
+        return {"response": response}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in chat: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
