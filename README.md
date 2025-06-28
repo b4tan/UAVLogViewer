@@ -75,3 +75,7 @@ docker run -e VUE_APP_CESIUM_TOKEN=<Your cesium ion token> -it -p 8080:8080 -v $
 # changes should automatically be applied to the viewer
 
 ```
+
+# New chatbot feature
+
+
