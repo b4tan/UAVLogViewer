@@ -78,4 +78,7 @@ docker run -e VUE_APP_CESIUM_TOKEN=<Your cesium ion token> -it -p 8080:8080 -v $
 
 # New chatbot feature
 
+![Techstack](https://github.com/b4tan/UAVLogViewer/blob/main/Techstack.jpg?raw=true)
+![Worklow](https://github.com/b4tan/UAVLogViewer/blob/main/Workflow.jpg?raw=true)
+![Toolsused](https://github.com/b4tan/UAVLogViewer/blob/main/ToolsUsed.jpg?raw=true)
 
